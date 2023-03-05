@@ -8,17 +8,38 @@ pub enum LogLevel {
     Info,
     Warning,
     Error,
+    Debug,
 }
+
+fn prefix(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Info => "[INFO]: ",
+        LogLevel::Warning => "[WARNING]: ",
+        LogLevel::Error => "[ERROR]: ",
+        LogLevel::Debug => "[DEBUG]: ",
+    }
+}
+
 /// primary function for emitting logs
 pub fn log(level: LogLevel, message: &str) -> String {
-    unimplemented!("return a message for the given log level")
+    let mut msg = String::new();
+    msg.push_str(prefix(level));
+    msg.push_str(message);
+    msg
 }
+
 pub fn info(message: &str) -> String {
-    unimplemented!("return a message for info log level")
+    log(LogLevel::Info, message)
 }
+
 pub fn warn(message: &str) -> String {
-    unimplemented!("return a message for warn log level")
+    log(LogLevel::Warning, message)
 }
+
 pub fn error(message: &str) -> String {
-    unimplemented!("return a message for error log level")
+    log(LogLevel::Error, message)
+}
+
+pub fn debug(message: &str) -> String {
+    log(LogLevel::Debug, message)
 }
