@@ -1,8 +1,5 @@
-// This stub file contains items that aren't used yet; feel free to remove this module attribute
-// to enable stricter warnings.
-#![allow(unused)]
+use std::fmt;
 
-/// various log levels
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum LogLevel {
     Info,
@@ -11,21 +8,20 @@ pub enum LogLevel {
     Debug,
 }
 
-fn prefix(level: LogLevel) -> &'static str {
-    match level {
-        LogLevel::Info => "[INFO]: ",
-        LogLevel::Warning => "[WARNING]: ",
-        LogLevel::Error => "[ERROR]: ",
-        LogLevel::Debug => "[DEBUG]: ",
+// NOTE: https://doc.rust-lang.org/std/fmt/trait.Display.html
+impl fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match self {
+            Self::Info => write!(f, "INFO"),
+            Self::Warning => write!(f, "WARNING"),
+            Self::Error => write!(f, "ERROR"),
+            Self::Debug => write!(f, "DEBUG"),
+        }
     }
 }
 
-/// primary function for emitting logs
 pub fn log(level: LogLevel, message: &str) -> String {
-    let mut msg = String::new();
-    msg.push_str(prefix(level));
-    msg.push_str(message);
-    msg
+    format!("[{level}]: {message}")
 }
 
 pub fn info(message: &str) -> String {
