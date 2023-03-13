@@ -1,123 +1,207 @@
-use anyhow::Result;
 use std::fmt;
 
-struct BitHand {
-    hand: u64,
-    score: u8,
-}
-
-fn rank_value(r: char) -> u8 {
-    match r {
-        '2' => 0,
-        '3' => 1,
-        '4' => 2,
-        '5' => 3,
-        '6' => 4,
-        '7' => 5,
-        '8' => 6,
-        '9' => 7,
-        'T' => 8,
-        'J' => 9,
-        'Q' => 10,
-        'K' => 11,
-        'A' => 12,
+fn char_val_to_normalised(binval: u8) -> u8 {
+    match binval {
+        // ranks
+        b'2' => 0,
+        b'3' => 1,
+        b'4' => 2,
+        b'5' => 3,
+        b'6' => 4,
+        b'7' => 5,
+        b'8' => 6,
+        b'9' => 7,
+        b'T' => 8,
+        b'J' => 9,
+        b'Q' => 10,
+        b'K' => 11,
+        b'A' => 12,
+        // suits
+        b'S' => 0,
+        b'H' => 1,
+        b'D' => 2,
+        b'C' => 3,
+        // all possible input characters are known in advance: reasonably safe
+        // to assume that any value not matched above will never *be* matched:
         _ => unreachable!(),
     }
 }
 
-fn suit_value(s: char) -> u8 {
-    match s {
-        'S' => 0,
-        'H' => 1,
-        'D' => 2,
-        'C' => 3,
-        _ => unreachable!(),
-    }
+fn not_space_char(binval: &u8) -> bool {
+    *binval != b' '
 }
 
-impl BitHand {
-    fn from(input_hand: &[&str]) -> Result<BitHand> {
-        let (hand, ranks, suits): (u64, u16, [u8; 5]) = input_hand.iter().enumerate().fold(
-            (0, 0, [0; 5]),
-            |(hand_bf, ranks_bf, mut suits), (i, card)| {
-                let card_chars = card.chars().collect::<Vec<char>>();
-                let rank = rank_value(card_chars[0]);
-                let suit = suit_value(card_chars[1]);
+fn is_straight(ranks: u16) -> bool {
+    let hi_mask = 0b11111;
+    let lo_mask = 0b0001000000001111;
 
-                suits[i] = suit;
-                (
-                    hand_bf | 1 << ((rank * 4) + suit),
-                    ranks_bf | 1 << rank,
-                    suits,
-                )
-            },
-        );
-
-        // Detects & produces the following values for these hands ONLY:
-        // - High card: 5
-        // - One pair: 6
-        // - Two pair: 7
-        // - Three of a kind: 9
-        // - Full house: 10
-        // - Four of a kind: 16
-        let (score_from_hand, _) = (0..=12).fold((0, hand), |(total, hand), _| {
-            let cards_in_rank = (hand & 0b1111).count_ones();
-            (total + (1 << cards_in_rank) - 1, hand >> 4)
-        });
-
-        let is_straight = (ranks & 0b0001000000001111) == 0b0001000000001111
-            || ((ranks >> ranks.trailing_zeros()) & 0b11111) == 0b11111;
-
-        let is_flush = (1..=4).fold(0, |res, i| res + suits[0] - suits[i]) == 0;
-
-        #[rustfmt::skip]
-        let score = match (score_from_hand, is_straight, is_flush) {
-            (5, false, false) => 0, // High card
-            (6,     _,     _) => 1, // One pair
-            (7,     _,     _) => 2, // Two pair
-            (9,     _,     _) => 3, // Three of a kind
-            (5,  true, false) => 4, // Straight
-            (5, false,  true) => 5, // Flush
-            (10,    _,     _) => 6, // Full house
-            (16,    _,     _) => 7, // Four of a kind
-            (5,  true,  true) => 8, // Straight flush
-            _ => unreachable!(),
-        };
-
-        Ok(BitHand { hand, score })
-    }
+    (ranks & lo_mask) == lo_mask || ((ranks >> ranks.trailing_zeros()) & hi_mask) == hi_mask
 }
 
-fn format_hand_bf(mut nshifter: u64) -> String {
-    let mut nflag = 0;
-    let mut chars: Vec<char> = vec![];
+fn is_flush(suits: u8) -> bool {
+    suits.count_ones() == 1
+}
 
-    while nflag < 79 {
-        nflag += 1;
-        if nflag % 5 == 0 {
-            chars.push(' ');
-        } else {
-            chars.push(if nshifter >> 63 == 1 { '1' } else { '0' });
-            nshifter <<= 1;
+#[derive(Debug)]
+pub struct Hand {
+    tally: u64,
+    ranks: u16,
+    suits: u8,
+    score: u32,
+}
+
+impl Hand {
+    fn from_slice(hand: &str) -> Hand {
+        hand.bytes()
+            .into_iter()
+            .filter(not_space_char)
+            .map(char_val_to_normalised)
+            .enumerate()
+            .fold(Hand::init(), |mut hand, (i, cval)| {
+                // if i is even, looking at rank. If i is odd, looking at suit
+                if i % 2 == 0 {
+                    hand.set_tally(cval);
+                    hand.set_rank(cval);
+                    hand.update_raw_score(cval);
+                } else {
+                    hand.set_suit(cval);
+                }
+
+                // Last element in byteslice iterator, can set the score properly:
+                if i == 9 {
+                    hand.normalise_raw_score();
+                }
+                hand
+            })
+    }
+
+    fn init() -> Hand {
+        Hand {
+            tally: 0,
+            ranks: 0,
+            suits: 0,
+            score: 0,
         }
     }
-    chars.into_iter().collect()
-}
 
-impl fmt::Display for BitHand {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let legend1 =
-            "               A    K    Q    J    T    9    8    7    6    5    4    3    2   ";
-        let legend2 =
-            "xxxx xxxx xxxx CDHS CDHS CDHS CDHS CDHS CDHS CDHS CDHS CDHS CDHS CDHS CDHS CDHS";
-        write!(f, "{}\n{}\n{}", legend1, legend2, format_hand_bf(self.hand))
+    fn set_tally(&mut self, rank: u8) -> &mut Hand {
+        let mut nibble_start = rank * 4;
+        let current_tally = (self.tally >> nibble_start & 0xf).trailing_ones() as u8;
+        nibble_start += current_tally;
+
+        self.tally |= 1 << nibble_start;
+        self
+    }
+
+    fn set_rank(&mut self, rank: u8) -> &mut Hand {
+        self.ranks |= 1 << rank;
+        self
+    }
+
+    fn set_suit(&mut self, suit: u8) -> &mut Hand {
+        self.suits |= 1 << suit;
+        self
+    }
+
+    // NOTE: IT IS *EXTREMELY* IMPORTANT THAT THE POSSIBLE RETURN VALUES FOR
+    // THIS ARE KNOWN, OTHERWISE MOST THINGS WILL FUCK UP WHEN ATTEMPTING TO
+    // NORMALISE SCORE.
+    fn update_raw_score(&mut self, rank: u8) -> &mut Hand {
+        let rank_nibble = (self.tally >> (rank * 4)) & 0xf;
+
+        self.score += 1 << rank_nibble;
+        self
+    }
+
+    // NOTE: only do this at the end!
+    fn normalise_raw_score(&mut self) -> &mut Hand {
+        let adjusted_score = match (self.score, is_straight(self.ranks), is_flush(self.suits)) {
+            (10, false, false) => 1, // high card
+            (16, _, _) => 2,         // one pair
+            (22, _, _) => 3,         // two pair
+            (142, _, _) => 4,        // three-of-a-kind
+            (10, true, false) => 5,  // straight
+            (10, false, true) => 6,  // flush
+            (148, _, _) => 7,        // full house
+            (32908, _, _) => 8,      // four-of-a-kind
+            (10, true, true) => 9,   // straight flush
+            (score, iss, isf) => {
+                println!(
+                    "WTF!, score is: {}, we think straight is {}, flush is {}",
+                    score, iss, isf
+                );
+                0
+            }
+        };
+
+        self.score = adjusted_score;
+        self
     }
 }
 
-/// Given a list of poker hands, return a list of those hands which win.
-///
-/// Note the type signature: this function should return _the same_ reference to
-/// the winning hand(s) as were passed in, not reconstructed strings which happen to be equal.
-pub fn winning_hands<'a>(hands: &[&'a str]) -> Vec<&'a str> {
-    unimplemented!("Out of {hands:?}, which hand wins?")
+/*----------------------------------------------------------------------------*\
+ * Horrible stuff for dirty debugging from hereon in:
+\*----------------------------------------------------------------------------*/
+
+fn horrible_string_chunker(input: String, chunks: usize) -> String {
+    let mut result = String::new();
+
+    for (i, c) in input.chars().enumerate() {
+        result.push(c);
+        if (i + 1) % chunks == 0 {
+            result.push(' ');
+        }
+    }
+    result
+}
+
+impl fmt::Display for Hand {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        let divider = "--------------------------------------------------------------------------------------------------";
+        let sdivider = "-------------------------------------------------------------------------";
+
+        let score_desc = match self.score {
+            1 => "High card",
+            2 => "One pair",
+            3 => "Two pair",
+            4 => "Three of a kind",
+            5 => "Straight",
+            6 => "Flush",
+            7 => "Full house",
+            8 => "Four of a kind",
+            9 => "Straight flush",
+            _ => panic!("Something has gone very wrong with the score calculation, sort it out!"),
+        };
+
+        let hand_rank = format!("For: {}\n{}", score_desc, divider);
+
+        let tally_legend = "   A    K    Q    J    T    9    8    7    6    5    4    3    2";
+        let tally_pprint = horrible_string_chunker(format!("{:052b}", self.tally), 4);
+        let tally = format!(
+            "         {}\nTallies: {}\n{}",
+            tally_legend, tally_pprint, sdivider
+        );
+
+        let ranks_legend = "A K Q J T 9 8 7 6 5 4 3 2";
+        let ranks_pprint = horrible_string_chunker(format!("{:013b}", self.ranks), 1);
+        let ranks = format!(
+            "         {}\nRanks:   {}\n{}",
+            ranks_legend, ranks_pprint, sdivider
+        );
+
+        let suits_legend = "S H D C";
+        let suits_pprint = horrible_string_chunker(format!("{:04b}", self.suits), 1);
+        let suits = format!(
+            "         {}\nSuits:   {}\n{}",
+            suits_legend, suits_pprint, divider
+        );
+
+        let score = format!("Overall score: {}\n{}", self.score, divider);
+
+        write!(
+            f,
+            "{}\n{}\n{}\n{}\n{}\n{}\n\n",
+            divider, hand_rank, tally, ranks, suits, score
+        )
+    }
 }
