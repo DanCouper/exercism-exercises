@@ -1,8 +1,37 @@
-use std::fmt;
+#![feature(stmt_expr_attributes)]
 
-fn char_val_to_normalised(binval: u8) -> u8 {
-    match binval {
-        // ranks
+pub fn winning_hands<'a>(hands: &[&'a str]) -> Vec<&'a str> {
+    let mut prev_hand = HandBitfields {
+        tally: 0,
+        ranks: 0,
+        suits: 0,
+        raw_score: 0,
+    };
+    let mut prev_tiebreaker = TieBreaker(0, 0, 0);
+    let mut rank_indices: Vec<usize> = vec![];
+
+    for (i, hand) in hands.iter().enumerate() {
+        let curr_hand = HandBitfields::from_slice(hand);
+        let curr_tiebreaker = TieBreaker::create_from_hand(&curr_hand);
+        let (curr_score, prev_score) = (curr_hand.score(), prev_hand.score());
+
+        if (curr_score > prev_score)
+            || ((curr_score == prev_score) && (curr_tiebreaker > prev_tiebreaker))
+        {
+            prev_hand = curr_hand;
+            prev_tiebreaker = curr_tiebreaker;
+            rank_indices.clear();
+            rank_indices.push(i);
+        } else if (curr_score == prev_score) && (curr_tiebreaker == prev_tiebreaker) {
+            rank_indices.push(i);
+        }
+    }
+    // REVIEW: can I use a bitfield for the indices rather than creating a vec?
+    rank_indices.iter().map(|i| hands[*i]).collect()
+}
+
+fn map_face_value(binary_val: u8) -> u8 {
+    match binary_val {
         b'2' => 0,
         b'3' => 1,
         b'4' => 2,
@@ -11,197 +40,214 @@ fn char_val_to_normalised(binval: u8) -> u8 {
         b'7' => 5,
         b'8' => 6,
         b'9' => 7,
-        b'T' => 8,
+        b'0' => 8,
         b'J' => 9,
         b'Q' => 10,
         b'K' => 11,
         b'A' => 12,
-        // suits
-        b'S' => 0,
-        b'H' => 1,
-        b'D' => 2,
-        b'C' => 3,
-        // all possible input characters are known in advance: reasonably safe
-        // to assume that any value not matched above will never *be* matched:
         _ => unreachable!(),
     }
 }
 
-fn not_space_char(binval: &u8) -> bool {
-    *binval != b' '
+fn map_suit_value(binary_val: u8) -> u8 {
+    match binary_val {
+        b'S' => 0,
+        b'H' => 1,
+        b'D' => 2,
+        b'C' => 3,
+        _ => unreachable!(),
+    }
 }
 
-fn is_straight(ranks: u16) -> bool {
-    let hi_mask = 0b11111;
-    let lo_mask = 0b0001000000001111;
-
-    (ranks & lo_mask) == lo_mask || ((ranks >> ranks.trailing_zeros()) & hi_mask) == hi_mask
-}
-
-fn is_flush(suits: u8) -> bool {
-    suits.count_ones() == 1
+#[derive(Debug, PartialEq, PartialOrd)]
+enum HandRank {
+    Unknown,
+    HighCard,
+    OnePair,
+    TwoPair,
+    ThreeOfAKind,
+    Straight,
+    Flush,
+    FullHouse,
+    FourOfAKind,
+    StraightFlush,
 }
 
 #[derive(Debug)]
-pub struct Hand {
+pub struct HandBitfields {
     tally: u64,
     ranks: u16,
     suits: u8,
-    score: u32,
+    raw_score: u32,
 }
 
-impl Hand {
-    fn from_slice(hand: &str) -> Hand {
+impl HandBitfields {
+    fn from_slice(hand: &str) -> HandBitfields {
         hand.bytes()
             .into_iter()
-            .filter(not_space_char)
-            .map(char_val_to_normalised)
+            // NOTE: to be able to map face_value/suits as even/odd, need an even number of
+            // face_value/suit pairs. So remove spaces, & treat '0' as a ten by removing '1'
+            .filter(|&binary_val| binary_val != b' ' && binary_val != b'1')
             .enumerate()
-            .fold(Hand::init(), |mut hand, (i, cval)| {
-                // if i is even, looking at rank. If i is odd, looking at suit
-                if i % 2 == 0 {
-                    hand.set_tally(cval);
-                    hand.set_rank(cval);
-                    hand.update_raw_score(cval);
-                } else {
-                    hand.set_suit(cval);
-                }
+            .fold(
+                HandBitfields {
+                    tally: 0,
+                    ranks: 0,
+                    suits: 0,
+                    raw_score: 0,
+                },
+                |mut hand, (i, current_val)| {
+                    if i % 2 == 0 {
+                        let rank = map_face_value(current_val);
+                        let target_tally_location = (rank * 4) as u32;
+                        let target_tally = hand.tally >> target_tally_location & 0xf;
 
-                // Last element in byteslice iterator, can set the score properly:
-                if i == 9 {
-                    hand.normalise_raw_score();
-                }
-                hand
-            })
+                        hand.ranks |= 1 << rank;
+                        hand.tally |= 1 << (target_tally_location + target_tally.count_ones());
+                        // NOTE: tally has been updated, isolate the *new* tally to get updated score
+                        hand.raw_score += 1 << (hand.tally >> target_tally_location & 0b1111);
+                    } else {
+                        let suit = map_suit_value(current_val);
+                        hand.suits |= 1 << suit;
+                    }
+                    hand
+                },
+            )
     }
 
-    fn init() -> Hand {
-        Hand {
-            tally: 0,
-            ranks: 0,
-            suits: 0,
-            score: 0,
+    fn is_high_straight(&self) -> bool {
+        let high_mask = 0b11111;
+        ((self.ranks >> self.ranks.trailing_zeros()) & high_mask) == high_mask
+    }
+
+    fn is_low_straight(&self) -> bool {
+        let low_mask = 0b0001000000001111;
+        (self.ranks & low_mask) == low_mask
+    }
+
+    fn is_flush(&self) -> bool {
+        self.suits.count_ones() == 1
+    }
+
+    fn score(&self) -> HandRank {
+        if self.raw_score == 0 {
+            return HandRank::Unknown;
+        }
+
+        let is_straight = self.is_low_straight() || self.is_high_straight();
+
+        #[rustfmt::skip]
+        match (self.raw_score, is_straight, self.is_flush()) {
+            (10, false, false)  => HandRank::HighCard,
+            (16, _, _)          => HandRank::OnePair,
+            (22, _, _)          => HandRank::TwoPair,
+            (142, _, _)         => HandRank::ThreeOfAKind,
+            (10, true, false)   => HandRank::Straight,
+            (10, false, true)   => HandRank::Flush,
+            (148, _, _)         => HandRank::FullHouse,
+            (32908, _, _)       => HandRank::FourOfAKind,
+            (10, true, true)    => HandRank::StraightFlush,
+            _                   => HandRank::Unknown,
         }
     }
+}
 
-    fn set_tally(&mut self, rank: u8) -> &mut Hand {
-        let mut nibble_start = rank * 4;
-        let current_tally = (self.tally >> nibble_start & 0xf).trailing_ones() as u8;
-        nibble_start += current_tally;
+#[derive(Debug)]
+struct TieBreaker(u32, u32, u32);
 
-        self.tally |= 1 << nibble_start;
-        self
-    }
-
-    fn set_rank(&mut self, rank: u8) -> &mut Hand {
-        self.ranks |= 1 << rank;
-        self
-    }
-
-    fn set_suit(&mut self, suit: u8) -> &mut Hand {
-        self.suits |= 1 << suit;
-        self
-    }
-
-    // NOTE: IT IS *EXTREMELY* IMPORTANT THAT THE POSSIBLE RETURN VALUES FOR
-    // THIS ARE KNOWN, OTHERWISE MOST THINGS WILL FUCK UP WHEN ATTEMPTING TO
-    // NORMALISE SCORE.
-    fn update_raw_score(&mut self, rank: u8) -> &mut Hand {
-        let rank_nibble = (self.tally >> (rank * 4)) & 0xf;
-
-        self.score += 1 << rank_nibble;
-        self
-    }
-
-    // NOTE: only do this at the end!
-    fn normalise_raw_score(&mut self) -> &mut Hand {
-        let adjusted_score = match (self.score, is_straight(self.ranks), is_flush(self.suits)) {
-            (10, false, false) => 1, // high card
-            (16, _, _) => 2,         // one pair
-            (22, _, _) => 3,         // two pair
-            (142, _, _) => 4,        // three-of-a-kind
-            (10, true, false) => 5,  // straight
-            (10, false, true) => 6,  // flush
-            (148, _, _) => 7,        // full house
-            (32908, _, _) => 8,      // four-of-a-kind
-            (10, true, true) => 9,   // straight flush
-            (score, iss, isf) => {
-                println!(
-                    "WTF!, score is: {}, we think straight is {}, flush is {}",
-                    score, iss, isf
-                );
-                0
+impl TieBreaker {
+    fn create_from_hand(hand: &HandBitfields) -> TieBreaker {
+        match hand.score() {
+            // NOTE: if the hand is a straight and aces are not low, logic is identical to high card and flush.
+            HandRank::HighCard | HandRank::Straight | HandRank::Flush | HandRank::StraightFlush => {
+                match hand.is_low_straight() {
+                    true => TieBreaker(0b1000, 0, 0),
+                    false => TieBreaker(hand.ranks as u32, 0, 0),
+                }
             }
-        };
+            // NOTE: for four of a kind, only need to check if lowest three bits are set for a given rank, same as full house. Five cards, and only one other rank.
+            HandRank::FullHouse | HandRank::FourOfAKind => {
+                let (left_rank, right_rank) =
+                    (15 - hand.ranks.leading_zeros(), hand.ranks.trailing_zeros());
+                match (hand.tally >> (left_rank * 4) & 0b111) == 0b111 {
+                    true => TieBreaker(left_rank, right_rank, 0),
+                    false => TieBreaker(right_rank, left_rank, 0),
+                }
+            }
+            // NOTE: three of a kind and two pair are *almost* identical, but the cascade can use a
+            // single value here (simply based on highest rank).
+            HandRank::ThreeOfAKind => {
+                let (left_rank, right_rank) =
+                    (15 - hand.ranks.leading_zeros(), hand.ranks.trailing_zeros());
+                // NOTE: zero highest bit so the middle bit is now the highest
+                let remaining_ranks = hand.ranks & ((1 << left_rank) - 1);
+                let middle_rank = 15 - remaining_ranks.leading_zeros();
 
-        self.score = adjusted_score;
-        self
-    }
-}
+                let left_rank_contains_trip = (hand.tally >> (left_rank * 4) & 0b111) == 0b111;
+                let middle_rank_contains_trip = (hand.tally >> (middle_rank * 4) & 0b111) == 0b111;
 
-/*----------------------------------------------------------------------------*\
- * Horrible stuff for dirty debugging from hereon in:
-\*----------------------------------------------------------------------------*/
+                match (left_rank_contains_trip, middle_rank_contains_trip) {
+                    (true, false) => {
+                        TieBreaker(left_rank, (hand.ranks as u32) & ((1 << left_rank) - 1), 0)
+                    }
+                    (false, true) => TieBreaker(
+                        middle_rank,
+                        (hand.ranks as u32) & ((1 << middle_rank) - 1),
+                        0,
+                    ),
+                    (false, false) => {
+                        TieBreaker(right_rank, (hand.ranks as u32) & ((1 << right_rank) - 1), 0)
+                    }
+                    _ => unreachable!(),
+                }
+            }
+            // NOTE: two pair is the only hand that can cascade twice & needs both cascaded ranks
+            // located.
+            HandRank::TwoPair => {
+                let (left_rank, right_rank) =
+                    (15 - hand.ranks.leading_zeros(), hand.ranks.trailing_zeros());
+                // NOTE: zero highest bit so the middle bit is now the highest
+                let remaining_ranks = hand.ranks & ((1 << left_rank) - 1);
+                let middle_rank = 15 - remaining_ranks.leading_zeros();
 
-fn horrible_string_chunker(input: String, chunks: usize) -> String {
-    let mut result = String::new();
+                let left_rank_contains_pair = (hand.tally >> (left_rank * 4) & 0b11) == 0b11;
+                let middle_rank_contains_pair = (hand.tally >> (middle_rank * 4) & 0b11) == 0b11;
 
-    for (i, c) in input.chars().enumerate() {
-        result.push(c);
-        if (i + 1) % chunks == 0 {
-            result.push(' ');
+                match (left_rank_contains_pair, middle_rank_contains_pair) {
+                    (true, true) => TieBreaker(left_rank, middle_rank, right_rank),
+                    (false, true) => TieBreaker(middle_rank, right_rank, left_rank),
+                    (true, false) => TieBreaker(left_rank, right_rank, middle_rank),
+                    _ => unreachable!(),
+                }
+            }
+            // NOTE: one pair is also the most onerous to check because there are four different ranks, but the pair must be located.
+            HandRank::OnePair => {
+                let mut pair_rank = 15 - hand.ranks.leading_zeros();
+
+                loop {
+                    if pair_rank == 0 || (hand.tally >> (pair_rank * 4) & 0b11) == 0b11 {
+                        break;
+                    } else {
+                        pair_rank -= 1;
+                        continue;
+                    }
+                }
+
+                TieBreaker(pair_rank, (hand.ranks as u32) & ((1 << pair_rank) - 1), 0)
+            }
+            HandRank::Unknown => TieBreaker(0, 0, 0),
         }
     }
-    result
 }
 
-impl fmt::Display for Hand {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let divider = "--------------------------------------------------------------------------------------------------";
-        let sdivider = "-------------------------------------------------------------------------";
+impl std::cmp::PartialEq for TieBreaker {
+    fn eq(&self, other: &Self) -> bool {
+        (self.0 == other.0) && (self.1 == other.1) && (self.2 == other.2)
+    }
+}
 
-        let score_desc = match self.score {
-            1 => "High card",
-            2 => "One pair",
-            3 => "Two pair",
-            4 => "Three of a kind",
-            5 => "Straight",
-            6 => "Flush",
-            7 => "Full house",
-            8 => "Four of a kind",
-            9 => "Straight flush",
-            _ => panic!("Something has gone very wrong with the score calculation, sort it out!"),
-        };
-
-        let hand_rank = format!("For: {}\n{}", score_desc, divider);
-
-        let tally_legend = "   A    K    Q    J    T    9    8    7    6    5    4    3    2";
-        let tally_pprint = horrible_string_chunker(format!("{:052b}", self.tally), 4);
-        let tally = format!(
-            "         {}\nTallies: {}\n{}",
-            tally_legend, tally_pprint, sdivider
-        );
-
-        let ranks_legend = "A K Q J T 9 8 7 6 5 4 3 2";
-        let ranks_pprint = horrible_string_chunker(format!("{:013b}", self.ranks), 1);
-        let ranks = format!(
-            "         {}\nRanks:   {}\n{}",
-            ranks_legend, ranks_pprint, sdivider
-        );
-
-        let suits_legend = "S H D C";
-        let suits_pprint = horrible_string_chunker(format!("{:04b}", self.suits), 1);
-        let suits = format!(
-            "         {}\nSuits:   {}\n{}",
-            suits_legend, suits_pprint, divider
-        );
-
-        let score = format!("Overall score: {}\n{}", self.score, divider);
-
-        write!(
-            f,
-            "{}\n{}\n{}\n{}\n{}\n{}\n\n",
-            divider, hand_rank, tally, ranks, suits, score
-        )
+impl std::cmp::PartialOrd for TieBreaker {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some((self.0, &self.1, &self.2).cmp(&(other.0, &other.1, &other.2)))
     }
 }
