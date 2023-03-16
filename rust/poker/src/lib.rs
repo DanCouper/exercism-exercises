@@ -1,65 +1,133 @@
-#![feature(stmt_expr_attributes)]
+#![feature(iter_array_chunks)]
 
 pub fn winning_hands<'a>(hands: &[&'a str]) -> Vec<&'a str> {
-    let mut prev_hand = HandBitfields {
-        tally: 0,
-        ranks: 0,
-        suits: 0,
-        raw_score: 0,
-    };
-    let mut prev_tiebreaker = TieBreaker(0, 0, 0);
-    let mut rank_indices: Vec<usize> = vec![];
+    let mut prev_hand = Hand(HandRank::Unknown, 0, 0, 0);
+    let mut winners = vec![];
 
     for (i, hand) in hands.iter().enumerate() {
-        let curr_hand = HandBitfields::from_slice(hand);
-        let curr_tiebreaker = TieBreaker::create_from_hand(&curr_hand);
-        let (curr_score, prev_score) = (curr_hand.score(), prev_hand.score());
+        let curr_hand = Hand::from_slice(hand);
 
-        if (curr_score > prev_score)
-            || ((curr_score == prev_score) && (curr_tiebreaker > prev_tiebreaker))
-        {
+        if curr_hand > prev_hand {
+            winners.clear();
+            winners.push(hands[i]);
             prev_hand = curr_hand;
-            prev_tiebreaker = curr_tiebreaker;
-            rank_indices.clear();
-            rank_indices.push(i);
-        } else if (curr_score == prev_score) && (curr_tiebreaker == prev_tiebreaker) {
-            rank_indices.push(i);
+        } else if curr_hand == prev_hand {
+            winners.push(hands[i]);
         }
     }
-    // REVIEW: can I use a bitfield for the indices rather than creating a vec?
-    rank_indices.iter().map(|i| hands[*i]).collect()
-}
 
-fn map_face_value(binary_val: u8) -> u8 {
-    match binary_val {
-        b'2' => 0,
-        b'3' => 1,
-        b'4' => 2,
-        b'5' => 3,
-        b'6' => 4,
-        b'7' => 5,
-        b'8' => 6,
-        b'9' => 7,
-        b'0' => 8,
-        b'J' => 9,
-        b'Q' => 10,
-        b'K' => 11,
-        b'A' => 12,
-        _ => unreachable!(),
-    }
-}
-
-fn map_suit_value(binary_val: u8) -> u8 {
-    match binary_val {
-        b'S' => 0,
-        b'H' => 1,
-        b'D' => 2,
-        b'C' => 3,
-        _ => unreachable!(),
-    }
+    winners
 }
 
 #[derive(Debug, PartialEq, PartialOrd)]
+struct Hand(HandRank, u16, u16, u16);
+
+impl Hand {
+    fn from_slice(hand_slice: &str) -> Hand {
+        let bfs = hand_slice
+            .chars()
+            .filter_map(parse_valid_hand_char)
+            .array_chunks()
+            .fold(Bitfields::init(), |mut bfs, [rank, suit]| {
+                // Set highest unset bit in the tally.
+                let new_tally_for_rank = bfs.tally_for_rank(rank) << 1 | 1;
+
+                bfs.ranks |= 1 << rank;
+                bfs.suits |= 1 << suit;
+                bfs.tally |= new_tally_for_rank << (rank * 4);
+                bfs.tally_score += 1 << new_tally_for_rank;
+                bfs
+            });
+
+        Hand::from_bitfields(bfs)
+    }
+
+    fn from_bitfields(bfs: Bitfields) -> Hand {
+        match bfs.tally_score {
+            10 => {
+                let is_straight = bfs.is_low_straight() | bfs.is_high_straight();
+                let is_flush = bfs.suits.count_ones() == 1;
+                let kicker = if bfs.is_low_straight() {
+                    0b1111
+                } else {
+                    bfs.ranks
+                };
+
+                match (is_straight, is_flush) {
+                    (false, false) => Hand(HandRank::HighCard, kicker, 0, 0),
+                    (true, false) => Hand(HandRank::Straight, kicker, 0, 0),
+                    (false, true) => Hand(HandRank::Flush, kicker, 0, 0),
+                    (true, true) => Hand(HandRank::StraightFlush, kicker, 0, 0),
+                }
+            }
+            16 => {
+                let (hi, midhi, midlo, lo) = bfs.rankpos4();
+                let (pair, kicker) = match (
+                    bfs.tally_for_rank(hi) == 0b11,
+                    bfs.tally_for_rank(midhi) == 0b11,
+                    bfs.tally_for_rank(midlo) == 0b11,
+                ) {
+                    (true, false, false) => (hi, bfs.zero_out_rank(hi)),
+                    (false, true, false) => (midhi, bfs.zero_out_rank(midhi)),
+                    (false, false, true) => (midhi, bfs.zero_out_rank(midlo)),
+                    (false, false, false) => (midlo, bfs.zero_out_rank(lo)),
+                    _ => unreachable!(),
+                };
+
+                Hand(HandRank::OnePair, pair, kicker, 0)
+            }
+            22 => {
+                let (hi, mid, lo) = bfs.rankpos3();
+                let (high_pair, low_pair, kicker) = match (
+                    bfs.tally_for_rank(hi) == 0b11,
+                    bfs.tally_for_rank(mid) == 0b11,
+                ) {
+                    (true, true) => (hi, mid, lo),
+                    (true, false) => (hi, lo, mid),
+                    (false, true) => (mid, lo, hi),
+                    _ => unreachable!(),
+                };
+
+                Hand(HandRank::TwoPair, high_pair, low_pair, kicker)
+            }
+            142 => {
+                let (hi, lo) = bfs.rankpos2();
+                let (trip, kicker) = match bfs.tally_for_rank(hi) == 0b111 {
+                    true => (hi, bfs.zero_out_rank(hi)),
+                    false => (lo, bfs.zero_out_rank(lo)),
+                };
+
+                Hand(HandRank::ThreeOfAKind, trip, kicker, 0)
+            }
+            148 => {
+                let (hi, lo) = bfs.rankpos2();
+                let (trip, pair) = match bfs.tally_for_rank(hi) == 0b111 {
+                    true => (hi, lo),
+                    false => (lo, hi),
+                };
+
+                Hand(HandRank::FullHouse, trip, pair, 0)
+            }
+            32908 => {
+                let (hi, lo) = bfs.rankpos2();
+                let (quad, kicker) = match bfs.tally_for_rank(hi) == 0b1111 {
+                    true => (hi, bfs.zero_out_rank(hi)),
+                    false => (lo, bfs.zero_out_rank(lo)),
+                };
+
+                Hand(HandRank::FourOfAKind, quad, kicker, 0)
+            }
+            _ => Hand(HandRank::Unknown, 0, 0, 0),
+        }
+    }
+}
+
+// NOTE: `trailing_zeros` returning a u32 is annoying when dealing with a u16.
+fn u16_trailing_zeros(n: u16) -> u16 {
+    u16::try_from(n.trailing_zeros()).unwrap()
+}
+
+#[derive(Debug, Clone, Copy, Eq, Ord, PartialOrd, PartialEq)]
 enum HandRank {
     Unknown,
     HighCard,
@@ -74,180 +142,95 @@ enum HandRank {
 }
 
 #[derive(Debug)]
-pub struct HandBitfields {
+struct Bitfields {
     tally: u64,
+    tally_score: u32,
     ranks: u16,
-    suits: u8,
-    raw_score: u32,
+    suits: u16,
 }
 
-impl HandBitfields {
-    fn from_slice(hand: &str) -> HandBitfields {
-        hand.bytes()
-            .into_iter()
-            // NOTE: to be able to map face_value/suits as even/odd, need an even number of
-            // face_value/suit pairs. So remove spaces, & treat '0' as a ten by removing '1'
-            .filter(|&binary_val| binary_val != b' ' && binary_val != b'1')
-            .enumerate()
-            .fold(
-                HandBitfields {
-                    tally: 0,
-                    ranks: 0,
-                    suits: 0,
-                    raw_score: 0,
-                },
-                |mut hand, (i, current_val)| {
-                    if i % 2 == 0 {
-                        let rank = map_face_value(current_val);
-                        let target_tally_location = (rank * 4) as u32;
-                        let target_tally = hand.tally >> target_tally_location & 0xf;
-
-                        hand.ranks |= 1 << rank;
-                        hand.tally |= 1 << (target_tally_location + target_tally.count_ones());
-                        // NOTE: tally has been updated, isolate the *new* tally to get updated score
-                        hand.raw_score += 1 << (hand.tally >> target_tally_location & 0b1111);
-                    } else {
-                        let suit = map_suit_value(current_val);
-                        hand.suits |= 1 << suit;
-                    }
-                    hand
-                },
-            )
+impl Bitfields {
+    fn init() -> Bitfields {
+        Bitfields {
+            tally: 0,
+            tally_score: 0,
+            ranks: 0,
+            suits: 0,
+        }
     }
 
+    // A sequence of 5 contiguous set bits in the ranks represents a straight.
     fn is_high_straight(&self) -> bool {
         let high_mask = 0b11111;
-        ((self.ranks >> self.ranks.trailing_zeros()) & high_mask) == high_mask
+        (self.ranks >> self.ranks.trailing_zeros() & high_mask) == high_mask
     }
 
+    // Aces occupy the highest bit set in ranks. A straight can be A,2,3,4,5, so
+    // in that case, looking for 5 contiguous bits won't work.
     fn is_low_straight(&self) -> bool {
         let low_mask = 0b0001000000001111;
         (self.ranks & low_mask) == low_mask
     }
 
-    fn is_flush(&self) -> bool {
-        self.suits.count_ones() == 1
+    // If there are two ranks present, get lowest and highest positions
+    fn rankpos2(&self) -> (u16, u16) {
+        let lorank = u16_trailing_zeros(self.ranks);
+        let hirank = u16_trailing_zeros(self.zero_out_rank(lorank));
+
+        (hirank, lorank)
     }
 
-    fn score(&self) -> HandRank {
-        if self.raw_score == 0 {
-            return HandRank::Unknown;
-        }
+    // If there are three ranks present, get lowest, highest and middle positions
+    fn rankpos3(&self) -> (u16, u16, u16) {
+        let mut ranks = self.ranks;
+        let lorank = u16_trailing_zeros(ranks);
+        ranks &= !(1 << lorank);
+        let midrank = u16_trailing_zeros(ranks);
+        ranks &= !(1 << midrank);
+        let hirank = u16_trailing_zeros(ranks);
 
-        let is_straight = self.is_low_straight() || self.is_high_straight();
-
-        #[rustfmt::skip]
-        match (self.raw_score, is_straight, self.is_flush()) {
-            (10, false, false)  => HandRank::HighCard,
-            (16, _, _)          => HandRank::OnePair,
-            (22, _, _)          => HandRank::TwoPair,
-            (142, _, _)         => HandRank::ThreeOfAKind,
-            (10, true, false)   => HandRank::Straight,
-            (10, false, true)   => HandRank::Flush,
-            (148, _, _)         => HandRank::FullHouse,
-            (32908, _, _)       => HandRank::FourOfAKind,
-            (10, true, true)    => HandRank::StraightFlush,
-            _                   => HandRank::Unknown,
-        }
+        (hirank, midrank, lorank)
     }
-}
 
-#[derive(Debug)]
-struct TieBreaker(u32, u32, u32);
+    // If there are four ranks present, get positions of all four
+    fn rankpos4(&self) -> (u16, u16, u16, u16) {
+        let mut ranks = self.ranks;
+        let lorank = u16_trailing_zeros(ranks);
+        ranks &= !(1 << lorank);
+        let midlorank = u16_trailing_zeros(ranks);
+        ranks &= !(1 << midlorank);
+        let midhirank = u16_trailing_zeros(ranks);
+        ranks &= !(1 << midhirank);
+        let hirank = u16_trailing_zeros(ranks);
 
-impl TieBreaker {
-    fn create_from_hand(hand: &HandBitfields) -> TieBreaker {
-        match hand.score() {
-            // NOTE: if the hand is a straight and aces are not low, logic is identical to high card and flush.
-            HandRank::HighCard | HandRank::Straight | HandRank::Flush | HandRank::StraightFlush => {
-                match hand.is_low_straight() {
-                    true => TieBreaker(0b1000, 0, 0),
-                    false => TieBreaker(hand.ranks as u32, 0, 0),
-                }
-            }
-            // NOTE: for four of a kind, only need to check if lowest three bits are set for a given rank, same as full house. Five cards, and only one other rank.
-            HandRank::FullHouse | HandRank::FourOfAKind => {
-                let (left_rank, right_rank) =
-                    (15 - hand.ranks.leading_zeros(), hand.ranks.trailing_zeros());
-                match (hand.tally >> (left_rank * 4) & 0b111) == 0b111 {
-                    true => TieBreaker(left_rank, right_rank, 0),
-                    false => TieBreaker(right_rank, left_rank, 0),
-                }
-            }
-            // NOTE: three of a kind and two pair are *almost* identical, but the cascade can use a
-            // single value here (simply based on highest rank).
-            HandRank::ThreeOfAKind => {
-                let (left_rank, right_rank) =
-                    (15 - hand.ranks.leading_zeros(), hand.ranks.trailing_zeros());
-                // NOTE: zero highest bit so the middle bit is now the highest
-                let remaining_ranks = hand.ranks & ((1 << left_rank) - 1);
-                let middle_rank = 15 - remaining_ranks.leading_zeros();
+        (hirank, midhirank, midlorank, lorank)
+    }
 
-                let left_rank_contains_trip = (hand.tally >> (left_rank * 4) & 0b111) == 0b111;
-                let middle_rank_contains_trip = (hand.tally >> (middle_rank * 4) & 0b111) == 0b111;
+    // Isolate the four bits representing a tally for a given card rank
+    fn tally_for_rank(&self, rank: u16) -> u64 {
+        self.tally >> (rank * 4) & 0b1111
+    }
 
-                match (left_rank_contains_trip, middle_rank_contains_trip) {
-                    (true, false) => {
-                        TieBreaker(left_rank, (hand.ranks as u32) & ((1 << left_rank) - 1), 0)
-                    }
-                    (false, true) => TieBreaker(
-                        middle_rank,
-                        (hand.ranks as u32) & ((1 << middle_rank) - 1),
-                        0,
-                    ),
-                    (false, false) => {
-                        TieBreaker(right_rank, (hand.ranks as u32) & ((1 << right_rank) - 1), 0)
-                    }
-                    _ => unreachable!(),
-                }
-            }
-            // NOTE: two pair is the only hand that can cascade twice & needs both cascaded ranks
-            // located.
-            HandRank::TwoPair => {
-                let (left_rank, right_rank) =
-                    (15 - hand.ranks.leading_zeros(), hand.ranks.trailing_zeros());
-                // NOTE: zero highest bit so the middle bit is now the highest
-                let remaining_ranks = hand.ranks & ((1 << left_rank) - 1);
-                let middle_rank = 15 - remaining_ranks.leading_zeros();
-
-                let left_rank_contains_pair = (hand.tally >> (left_rank * 4) & 0b11) == 0b11;
-                let middle_rank_contains_pair = (hand.tally >> (middle_rank * 4) & 0b11) == 0b11;
-
-                match (left_rank_contains_pair, middle_rank_contains_pair) {
-                    (true, true) => TieBreaker(left_rank, middle_rank, right_rank),
-                    (false, true) => TieBreaker(middle_rank, right_rank, left_rank),
-                    (true, false) => TieBreaker(left_rank, right_rank, middle_rank),
-                    _ => unreachable!(),
-                }
-            }
-            // NOTE: one pair is also the most onerous to check because there are four different ranks, but the pair must be located.
-            HandRank::OnePair => {
-                let mut pair_rank = 15 - hand.ranks.leading_zeros();
-
-                loop {
-                    if pair_rank == 0 || (hand.tally >> (pair_rank * 4) & 0b11) == 0b11 {
-                        break;
-                    } else {
-                        pair_rank -= 1;
-                        continue;
-                    }
-                }
-
-                TieBreaker(pair_rank, (hand.ranks as u32) & ((1 << pair_rank) - 1), 0)
-            }
-            HandRank::Unknown => TieBreaker(0, 0, 0),
-        }
+    // Return a new set of ranks with given rank zeroed out
+    fn zero_out_rank(&self, rank: u16) -> u16 {
+        self.ranks & !(1 << rank)
     }
 }
 
-impl std::cmp::PartialEq for TieBreaker {
-    fn eq(&self, other: &Self) -> bool {
-        (self.0 == other.0) && (self.1 == other.1) && (self.2 == other.2)
-    }
-}
-
-impl std::cmp::PartialOrd for TieBreaker {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some((self.0, &self.1, &self.2).cmp(&(other.0, &other.1, &other.2)))
+// Parse
+fn parse_valid_hand_char(c: char) -> Option<u16> {
+    match c {
+        '2'..='9' => Some((c as u16) - 50),
+        '0' => Some(8),
+        'J' => Some(9),
+        'Q' => Some(10),
+        'K' => Some(11),
+        'A' => Some(12),
+        // Suits
+        'S' => Some(0),
+        'H' => Some(1),
+        'D' => Some(2),
+        'C' => Some(3),
+        _ => None,
     }
 }
